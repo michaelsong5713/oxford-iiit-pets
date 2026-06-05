@@ -174,7 +174,7 @@ class neural_network(nn.Module):
         for i in range[num_images]:
             cur_image,cur_mask = images[i],masks[i]
             cur_output = output[i]
-        
+
     def train_epoch(self,t_dataloader,v_dataloader,loss_fn,optimizer,scheduler,device):
         self.visualize(v_dataloader,device,3)
         self.train()
@@ -205,7 +205,7 @@ class neural_network(nn.Module):
         val_avg_loss = val_loss/num
         print(f"Validation Loss: {val_avg_loss}")
         scheduler.step()
-    
+
     def test(self):
         pass
 
