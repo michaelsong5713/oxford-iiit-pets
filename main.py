@@ -12,11 +12,34 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 if torch.cuda.is_available():
     print("GPU Name:", torch.cuda.get_device_name(0),"\n")
 
+mean =  ([0.485, 0.456, 0.406])
+std = ([0.229, 0.224, 0.225])
+
+train_transform = v2.Compose([
+    v2.Resize((256, 256)),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32,scale=True),
+    v2.Normalize(mean=mean,std=std)
+])
+
+test_transform = v2.Compose([
+    v2.Resize((256, 256)),
+    v2.ToImage(),
+    v2.ToDtype(torch.float32,scale=True),
+    v2.Normalize(mean=mean,std=std)
+])
+
+mask_transform = v2.Compose([
+    v2.Resize((256, 256), interpolation=v2.InterpolationMode.NEAREST),
+    v2.ToImage(),
+    v2.Lambda(lambda x: x.squeeze(0).long() - 1)
+])
+
 def t_transforms_fn(image, mask):
     return train_transform(image), mask_transform(mask)
 
 def v_transforms_fn(image, mask):
-    return train_transform(image), mask_transform(mask)
+    return test_transform(image), mask_transform(mask)
 
 train_data = datasets.OxfordIIITPet(
     root = "data",
@@ -55,30 +78,6 @@ for i in range(5):
 plt.tight_layout()
 plt.show()
 '''
-
-mean =  ([0.485, 0.456, 0.406])
-std = ([0.229, 0.224, 0.225])
-
-train_transform = v2.Compose([
-    v2.Resize((256, 256)),
-    v2.ToImage(),
-    v2.ToDtype(torch.float32,scale=True),
-    v2.Normalize(mean=mean,std=std)
-])
-
-test_transform = v2.Compose([
-    v2.Resize((256, 256)),
-    v2.ToImage(),
-    v2.ToDtype(torch.float32,scale=True),
-    v2.Normalize(mean=mean,std=std)
-])
-
-mask_transform = v2.Compose([
-    v2.Resize((256, 256), interpolation=v2.InterpolationMode.NEAREST),
-    v2.ToImage(),
-    v2.Lambda(lambda x: x.squeeze(0).long() - 1)
-])
-
 '''
 train_data.transform = train_transform
 test_dataset.transform = test_transform
@@ -94,9 +93,9 @@ train_dataset,val_dataset = random_split(
     [train_size,val_size]
 )
 
-train_dataloader = DataLoader(train_dataset,batch_size=64,shuffle=True)
-val_dataloader = DataLoader(val_dataset,batch_size=64,shuffle=False)
-test_dataloader = DataLoader(test_dataset,batch_size=64,shuffle=False)
+train_dataloader = DataLoader(train_dataset,batch_size=16,shuffle=True)
+val_dataloader = DataLoader(val_dataset,batch_size=16,shuffle=False)
+test_dataloader = DataLoader(test_dataset,batch_size=16,shuffle=False)
 
 class double_conv_block(nn.Module):
     def __init__(self,in_ch,out_ch):
@@ -110,7 +109,7 @@ class double_conv_block(nn.Module):
             nn.ReLU()
         )
     def forward(self,x):
-        return self.block(x)   
+        return self.block(x)
 
 class down(nn.Module):
     def __init__(self,in_ch,out_ch):
@@ -164,18 +163,31 @@ class neural_network(nn.Module):
         d = self.decoder1(d,e1)
 
         return self.output(d)
+    def visualize(self,v_dataloader,device,num_images):
+        self.eval()
+        images,masks = next(iter(v_dataloader))
+        images,masks = images.to(device),masks.to(device)
+        print(f"{images.shape}")
+        print(f"{masks.shape}")
+        with torch.no_grad():
+            output = self(images).argmax(dim=1) #16x256x256
+        for i in range[num_images]:
+            cur_image,cur_mask = images[i],masks[i]
+            cur_output = output[i]
+        
     def train_epoch(self,t_dataloader,v_dataloader,loss_fn,optimizer,scheduler,device):
+        self.visualize(v_dataloader,device,3)
         self.train()
         train_loss = 0
         num = 0
         for batch_d,batch_l in t_dataloader:
             batch_d, batch_l = batch_d.to(device), batch_l.to(device)
+            optimizer.zero_grad()
             #print(f"Mask Shape: {batch_l.shape}")
             output = self(batch_d)
             loss = loss_fn(output,batch_l)
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
             train_loss+=loss.item()
             num+=1
         train_avg_loss = train_loss/num
@@ -193,12 +205,13 @@ class neural_network(nn.Module):
         val_avg_loss = val_loss/num
         print(f"Validation Loss: {val_avg_loss}")
         scheduler.step()
+    
     def test(self):
-
         pass
 
 generations=10
 model = neural_network().to(device)
+#calculate weights
 loss_fn = nn.CrossEntropyLoss()
 optimizer = torch.optim.Adam(model.parameters(),lr=0.001)
 scheduler = CosineAnnealingLR(optimizer,T_max=generations)
@@ -206,4 +219,3 @@ scheduler = CosineAnnealingLR(optimizer,T_max=generations)
 for i in range(generations):
     print(f"Epoch: {i+1}\n")
     model.train_epoch(train_dataloader,val_dataloader,loss_fn,optimizer,scheduler,device)
-
