@@ -31,7 +31,7 @@ class DiceLoss(nn.Module):
 
         predict = F.softmax(predict, dim=1) # (N, C, *) ==> (N, C, *)
         ## convert target(N, 1, *) into one hot vector (N, C, *)
-        target_onehot = torch.zeros(predict.size()).cuda()  # (N, 1, *) ==> (N, C, *)
+        target_onehot = torch.zeros_like(predict)  # (N, 1, *) ==> (N, C, *)
         target_onehot.scatter_(1, target, 1)  # (N, C, *)
 
         intersection = torch.sum(predict * target_onehot, dim=2)  # (N, C)

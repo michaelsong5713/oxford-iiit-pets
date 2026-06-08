@@ -6,20 +6,30 @@ from torchvision.transforms import v2
 from torch.utils.data import random_split
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import CosineAnnealingLR
+#from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchmetrics import JaccardIndex
 from dice_loss import DiceLoss
+from focal_loss import FocalLoss
+from dataset_transform import Dataset_Creator
+#import segmentation_models_pytorch as smp
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 if __name__ == '__main__':
     if torch.cuda.is_available():
         print("GPU Name:", torch.cuda.get_device_name(0),"\n")
+scaler = torch.amp.GradScaler()
 
 mean =  ([0.485, 0.456, 0.406])
 std = ([0.229, 0.224, 0.225])
 
+spatial_transform = v2.Compose([
+    v2.RandomResizedCrop(size=(256, 256), scale=(0.8, 1.0), ratio=(0.9, 1.1), interpolation=v2.InterpolationMode.BILINEAR),
+    v2.RandomHorizontalFlip(p=0.5),
+    #v2.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=None, shear=None, interpolation=v2.InterpolationMode.BILINEAR)
+])
+
 train_transform = v2.Compose([
-    v2.Resize((256, 256)),
+    v2.ColorJitter(brightness=0.2,contrast=0.2,saturation=0.2),
     v2.ToImage(),
     v2.ToDtype(torch.float32,scale=True),
     v2.Normalize(mean=mean,std=std)
@@ -33,16 +43,22 @@ test_transform = v2.Compose([
 ])
 
 mask_transform = v2.Compose([
-    v2.Resize((256, 256), interpolation=v2.InterpolationMode.NEAREST),
     v2.ToImage(),
-    v2.Lambda(lambda x: x.squeeze(0).long() - 1)
+    v2.Lambda(lambda x: torch.where(x == 0, 2, x).squeeze(0).long() - 1)
 ])
 
-def t_transforms_fn(image, mask):
+test_mask_transform = v2.Compose([
+    v2.Resize((256, 256), interpolation=v2.InterpolationMode.NEAREST),
+    v2.ToImage(),
+    v2.Lambda(lambda x: torch.where(x == 0, 2, x).squeeze(0).long() - 1)
+])
+
+def train_transforms_fn(image, mask):
+    image,mask = spatial_transform(image,mask)
     return train_transform(image), mask_transform(mask)
 
-def v_transforms_fn(image, mask):
-    return test_transform(image), mask_transform(mask)
+def test_transforms_fn(image, mask):
+    return test_transform(image), test_mask_transform(mask)
 
 
 class double_conv_block(nn.Module):
@@ -112,32 +128,33 @@ class neural_network(nn.Module):
 
         return self.output(d)
     def visualize(self,viz_images,viz_masks,device,num_images,epoch):
-        mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
-        std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
-        self.eval()
-        images,masks = viz_images.to(device),viz_masks.to(device)
-        #print(f"{images.shape}")
-        #print(f"{masks.shape}")
-        with torch.no_grad():
-            output = self(images).argmax(dim=1) #16x256x256
-        fig, axes = plt.subplots(num_images, 3, figsize=(10, num_images * 3))
-        axes[0, 0].set_title("Image")
-        axes[0, 1].set_title("True Mask")
-        axes[0, 2].set_title("Predicted Mask")
-        pil_fn = v2.ToPILImage()
-        for i in range(int(num_images)):
-            cur_image,cur_mask = images[i],masks[i]
-            cur_output = output[i]
-            cur_image = cur_image.cpu()*std+mean
-            cur_image = pil_fn(cur_image)
-            axes[i, 0].imshow(cur_image)
-            axes[i, 1].imshow(cur_mask.cpu().numpy(), cmap='tab10', vmin=0, vmax=2)
-            axes[i, 2].imshow(cur_output.cpu().numpy(), cmap='tab10', vmin=0, vmax=2)
-            for ax in axes[i]: ax.axis("off")
-        plt.suptitle(f"Epoch {epoch}")
-        plt.tight_layout()
-        plt.savefig(f"outputs/epoch_{epoch}.png")
-        plt.close()
+        if epoch%5==0 or epoch ==1:
+            mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
+            std  = torch.tensor([0.229, 0.224, 0.225]).view(3,1,1)
+            self.eval()
+            images,masks = viz_images.to(device),viz_masks.to(device)
+            #print(f"{images.shape}")
+            #print(f"{masks.shape}")
+            with torch.no_grad():
+                output = self(images).argmax(dim=1) #16x256x256
+            fig, axes = plt.subplots(num_images, 3, figsize=(10, num_images * 3))
+            axes[0, 0].set_title("Image")
+            axes[0, 1].set_title("True Mask")
+            axes[0, 2].set_title("Predicted Mask")
+            pil_fn = v2.ToPILImage()
+            for i in range(int(num_images)):
+                cur_image,cur_mask = images[i],masks[i]
+                cur_output = output[i]
+                cur_image = cur_image.cpu()*std+mean
+                cur_image = pil_fn(cur_image)
+                axes[i, 0].imshow(cur_image)
+                axes[i, 1].imshow(cur_mask.cpu().numpy(), cmap='tab10', vmin=0, vmax=2)
+                axes[i, 2].imshow(cur_output.cpu().numpy(), cmap='tab10', vmin=0, vmax=2)
+                for ax in axes[i]: ax.axis("off")
+            plt.suptitle(f"Epoch {epoch}")
+            plt.tight_layout()
+            plt.savefig(f"outputs/epoch_{epoch}.png")
+            plt.close()
 
     def train_epoch(self,t_dataloader,v_dataloader,loss_fn,optimizer,scheduler,device,epoch,iou_fn,dice_loss_fn,viz_images,viz_masks):
         self.train()
@@ -146,21 +163,22 @@ class neural_network(nn.Module):
         for batch_d,batch_l in t_dataloader:
             batch_d,batch_l = batch_d.to(device),batch_l.to(device)
             optimizer.zero_grad()
-            #print(f"Mask Shape: {batch_l.shape}")
-            output = self(batch_d)
-            loss = loss_fn(output,batch_l)+dice_loss_fn(output,batch_l)
-            loss.backward()
-            optimizer.step()
+            with torch.autocast("cuda"):
+                output = self(batch_d)
+                loss = 0.3*loss_fn(output,batch_l)+dice_loss_fn(output,batch_l)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
             train_loss+=loss.item()
             num+=1
-            #train_avg_loss = train_loss/num
-            #print(f"Training Loss: {train_avg_loss}")
             iou_fn.update(output.argmax(dim=1),batch_l)
+            scheduler.step()
         train_avg_loss = train_loss/num
         print(f"Training Loss: {train_avg_loss}")
         train_iou = iou_fn.compute()
         iou_fn.reset()
-        print(f"Training IoU: {train_iou}")
+        print(f"Training Class IoU: {train_iou}")
+        print(f"Training Mean IoU: {train_iou.mean().item()}")
         self.eval()
         val_loss = 0
         num = 0
@@ -168,17 +186,18 @@ class neural_network(nn.Module):
             for batch_d,batch_l in v_dataloader:
                 batch_d,batch_l = batch_d.to(device),batch_l.to(device)
                 output = self(batch_d)
-                loss = loss_fn(output,batch_l)+dice_loss_fn(output,batch_l)
+                loss = 0.3*loss_fn(output,batch_l)+dice_loss_fn(output,batch_l)
                 val_loss+=loss.item()
                 num+=1
                 iou_fn.update(output.argmax(dim=1),batch_l)
-        scheduler.step()
+        
         self.visualize(viz_images,viz_masks,device,5,epoch)
         val_avg_loss = val_loss/num
         print(f"Validation Loss: {val_avg_loss}")
         val_iou = iou_fn.compute()
         iou_fn.reset()
-        print(f"Validation IoU: {val_iou}")
+        print(f"Validation Class IoU: {val_iou}")
+        print(f"Validation Mean IOU: {val_iou.mean().item()}")
         return val_iou
 
     def test(self,test_dataloader,device,iou_fn):
@@ -196,7 +215,6 @@ if __name__ == '__main__':
         root = "data",
         split = "trainval",
         target_types = "segmentation",
-        transforms = t_transforms_fn,
         download = True
     )
 
@@ -204,7 +222,7 @@ if __name__ == '__main__':
         root = "data",
         split = "test",
         target_types = "segmentation",
-        transforms = v_transforms_fn,
+        transforms = test_transforms_fn,
         download = True
     )
 
@@ -215,6 +233,10 @@ if __name__ == '__main__':
         train_data,
         [train_size,val_size]
     )
+
+    train_dataset = Dataset_Creator(train_dataset,train_transforms_fn)
+    val_dataset = Dataset_Creator(val_dataset,test_transforms_fn)
+
     train_dataloader = DataLoader(train_dataset,batch_size=16,shuffle=True,num_workers=4,pin_memory=True,persistent_workers=True)
     val_dataloader = DataLoader(val_dataset,batch_size=16,shuffle=False,num_workers=4,pin_memory=True,persistent_workers=True)
     test_dataloader = DataLoader(test_dataset,batch_size=16,shuffle=False,num_workers=4,pin_memory=True,persistent_workers=True)
@@ -222,6 +244,8 @@ if __name__ == '__main__':
     generations=40
     model = neural_network().to(device)
 
+    #For the weighted crossentropyloss
+    
     counts = torch.tensor([0,0,0])
     for labels,masks in train_dataloader:
         for i in range(3):
@@ -229,20 +253,31 @@ if __name__ == '__main__':
     total = counts.sum()
     weights =  total/(3*counts)
     weights = weights.to(device)
-
+    weights = weights.clamp(max=2.5)
+    print(f"{weights}\n")
+    #loss_fn = nn.CrossEntropyLoss(weight = weights)
+    
     dice_loss_fn = DiceLoss()
-    loss_fn = nn.CrossEntropyLoss(weight = weights)
-    optimizer = torch.optim.Adam(model.parameters(),lr=0.001)
-    scheduler = CosineAnnealingLR(optimizer,T_max=generations)
-    iou_fn = JaccardIndex(task="multiclass", num_classes=3).to(device)
+    loss_fn = FocalLoss(weight=weights, gamma=2.0)
+    optimizer = torch.optim.Adam(model.parameters(),lr=0.003)
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=0.003,
+        steps_per_epoch=len(train_dataloader),
+        epochs=generations,
+        pct_start=0.3, 
+        div_factor=10.0, 
+        final_div_factor=1000.0
+    )
+    iou_fn = JaccardIndex(task="multiclass", num_classes=3,average=None).to(device)
     viz_images, viz_masks = next(iter(val_dataloader))
 
     best_iou = 0
     for i in range(generations):
         print(f"Epoch: {i+1}\n")
         val_iou = model.train_epoch(train_dataloader,val_dataloader,loss_fn,optimizer,scheduler,device,i+1,iou_fn,dice_loss_fn,viz_images,viz_masks)
-        if val_iou > best_iou:
-            best_iou = val_iou
+        if val_iou.mean().item() > best_iou:
+            best_iou = val_iou.mean().item()
             torch.save(model.state_dict(), "models/best_model.pth")
     print(f"\nTraining Done\n")
     model.test(test_dataloader,device,iou_fn)
