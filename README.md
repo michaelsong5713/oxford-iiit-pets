@@ -11,3 +11,9 @@ Third testing:
 Added further data augmentation with randomresizecrop and randomaffine for rotations, cropping, and translations.
 Added a custom FocalIOU to better match the scenario as the pixel boundary in class 3 of the mask is very thin.
 Switched from cosineannealing lr scheduler to oneshot following the idea of super-convergence (https://arxiv.org/abs/1708.07120)
+
+Final IOU: 0.776833333333
+
+Fourth Testing:
+Since the borders of the model are too thick, i increased the weight of the focal loss
+Added weight decay to prevent overfitting in the model.

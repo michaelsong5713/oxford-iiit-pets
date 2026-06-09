@@ -11,6 +11,7 @@ from torchmetrics import JaccardIndex
 from dice_loss import DiceLoss
 from focal_loss import FocalLoss
 from dataset_transform import Dataset_Creator
+from torchvision import tv_tensors
 #import segmentation_models_pytorch as smp
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -54,10 +55,12 @@ test_mask_transform = v2.Compose([
 ])
 
 def train_transforms_fn(image, mask):
-    image,mask = spatial_transform(image,mask)
+    mask = tv_tensors.Mask(mask)
+    image, mask = spatial_transform(image, mask)
     return train_transform(image), mask_transform(mask)
 
 def test_transforms_fn(image, mask):
+    mask = tv_tensors.Mask(mask)
     return test_transform(image), test_mask_transform(mask)
 
 
@@ -207,7 +210,8 @@ class neural_network(nn.Module):
                 output = self(batch_d)
                 iou_fn.update(output.argmax(dim=1),batch_l)
         test_iou = iou_fn.compute()
-        print(f"Final IOU: {test_iou}")
+        print(f"Final Class IOU: {test_iou}")
+        print(f"Final Mean IOU: {test_iou.mean().item()}")
         pass
 
 if __name__ == '__main__':
@@ -253,13 +257,13 @@ if __name__ == '__main__':
     total = counts.sum()
     weights =  total/(3*counts)
     weights = weights.to(device)
-    weights = weights.clamp(max=2.5)
+    #weights = weights.clamp(max=2.5)
     print(f"{weights}\n")
     #loss_fn = nn.CrossEntropyLoss(weight = weights)
     
     dice_loss_fn = DiceLoss()
     loss_fn = FocalLoss(weight=weights, gamma=2.0)
-    optimizer = torch.optim.Adam(model.parameters(),lr=0.003)
+    optimizer = torch.optim.Adam(model.parameters(),lr=0.003,weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
         max_lr=0.003,
