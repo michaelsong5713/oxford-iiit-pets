@@ -26,7 +26,7 @@ std = ([0.229, 0.224, 0.225])
 spatial_transform = v2.Compose([
     v2.RandomResizedCrop(size=(256, 256), scale=(0.8, 1.0), ratio=(0.9, 1.1), interpolation=v2.InterpolationMode.BILINEAR),
     v2.RandomHorizontalFlip(p=0.5),
-    #v2.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=None, shear=None, interpolation=v2.InterpolationMode.BILINEAR)
+    v2.RandomAffine(degrees=15, translate=(0.1, 0.1), scale=None, shear=None, interpolation=v2.InterpolationMode.BILINEAR)
 ])
 
 train_transform = v2.Compose([
@@ -65,7 +65,7 @@ def test_transforms_fn(image, mask):
 
 
 class double_conv_block(nn.Module):
-    def __init__(self,in_ch,out_ch):
+    def __init__(self,in_ch,out_ch,dropout=0.0):
         super().__init__()
         self.block = nn.Sequential(
             nn.Conv2d(in_ch,out_ch,kernel_size=3,stride=1,padding=1),
@@ -73,26 +73,27 @@ class double_conv_block(nn.Module):
             nn.ReLU(),
             nn.Conv2d(out_ch,out_ch,kernel_size=3,stride=1,padding=1),
             nn.BatchNorm2d(out_ch),
-            nn.ReLU()
+            nn.ReLU(),
+            nn.Dropout2d(dropout)
         )
     def forward(self,x):
         return self.block(x)
 
 class down(nn.Module):
-    def __init__(self,in_ch,out_ch):
+    def __init__(self,in_ch,out_ch,dropout=0.0):
         super().__init__()
         self.block = nn.Sequential(
             nn.MaxPool2d(kernel_size=2,stride=2),
-            double_conv_block(in_ch,out_ch)
+            double_conv_block(in_ch,out_ch,dropout)
         )
     def forward(self,x):
         return self.block(x)
 
 class up(nn.Module):
-    def __init__(self,in_ch,out_ch):
+    def __init__(self,in_ch,out_ch,dropout=0.0):
         super().__init__()
         self.upscale = nn.ConvTranspose2d(in_ch,out_ch,kernel_size=2,stride=2)
-        self.conv = double_conv_block(in_ch,out_ch)
+        self.conv = double_conv_block(in_ch,out_ch,dropout)
     def forward(self,input,skip):
         input = self.upscale(input)
         return self.conv(torch.cat([input,skip],dim=1))
@@ -104,12 +105,12 @@ class neural_network(nn.Module):
         self.encoder1 = double_conv_block(in_ch, features) #256x256 64 channels
         self.encoder2 = down(features, features*2) #128x128 128 channels
         self.encoder3 = down(features*2, features*4) #64x64 256 channels
-        self.encoder4 = down(features*4, features*8) #32x32 512 channels
+        self.encoder4 = down(features*4, features*8,dropout=0.25) #32x32 512 channels
 
-        self.bottleneck = down(features*8,features*16) #16x16 1024 channels
+        self.bottleneck = down(features*8,features*16,dropout=0.3) #16x16 1024 channels
 
-        self.decoder4 = up(features*16,features*8)
-        self.decoder3 = up(features*8,features*4)
+        self.decoder4 = up(features*16,features*8,dropout=0.25)
+        self.decoder3 = up(features*8,features*4,dropout=0.1)
         self.decoder2 = up(features*4,features*2)
         self.decoder1 = up(features*2,features)
 
@@ -130,6 +131,15 @@ class neural_network(nn.Module):
         d = self.decoder1(d,e1)
 
         return self.output(d)
+
+    def predict_tta(self,x):
+        #sourced from ai
+        out = self(x).softmax(dim=1)
+        flipped = torch.flip(x,dims=[3])
+        out_flipped = self(flipped).softmax(dim=1)
+        out_flipped = torch.flip(out_flipped,dims=[3])
+        return out+out_flipped
+
     def visualize(self,viz_images,viz_masks,device,num_images,epoch):
         if epoch%5==0 or epoch ==1:
             mean = torch.tensor([0.485, 0.456, 0.406]).view(3,1,1)
@@ -139,7 +149,7 @@ class neural_network(nn.Module):
             #print(f"{images.shape}")
             #print(f"{masks.shape}")
             with torch.no_grad():
-                output = self(images).argmax(dim=1) #16x256x256
+                output = self.predict_tta(images).argmax(dim=1) #16x256x256
             fig, axes = plt.subplots(num_images, 3, figsize=(10, num_images * 3))
             axes[0, 0].set_title("Image")
             axes[0, 1].set_title("True Mask")
@@ -204,10 +214,11 @@ class neural_network(nn.Module):
         return val_iou
 
     def test(self,test_dataloader,device,iou_fn):
+        self.eval()
         with torch.no_grad():
             for batch_d,batch_l in test_dataloader:
                 batch_d,batch_l = batch_d.to(device),batch_l.to(device)
-                output = self(batch_d)
+                output = self.predict_tta(batch_d)
                 iou_fn.update(output.argmax(dim=1),batch_l)
         test_iou = iou_fn.compute()
         print(f"Final Class IOU: {test_iou}")
@@ -245,7 +256,7 @@ if __name__ == '__main__':
     val_dataloader = DataLoader(val_dataset,batch_size=16,shuffle=False,num_workers=4,pin_memory=True,persistent_workers=True)
     test_dataloader = DataLoader(test_dataset,batch_size=16,shuffle=False,num_workers=4,pin_memory=True,persistent_workers=True)
 
-    generations=40
+    generations=70
     model = neural_network().to(device)
 
     #For the weighted crossentropyloss
@@ -257,16 +268,17 @@ if __name__ == '__main__':
     total = counts.sum()
     weights =  total/(3*counts)
     weights = weights.to(device)
-    #weights = weights.clamp(max=2.5)
+    weights = weights.clamp(max=2.0)
     print(f"{weights}\n")
     #loss_fn = nn.CrossEntropyLoss(weight = weights)
     
+    learning_rate = 0.001
     dice_loss_fn = DiceLoss()
     loss_fn = FocalLoss(weight=weights, gamma=2.0)
-    optimizer = torch.optim.Adam(model.parameters(),lr=0.003,weight_decay=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(),lr=learning_rate,weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer,
-        max_lr=0.003,
+        max_lr=learning_rate,
         steps_per_epoch=len(train_dataloader),
         epochs=generations,
         pct_start=0.3, 

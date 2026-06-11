@@ -1,19 +1,36 @@
-Final IOU: 0.7563543319702148
+# Oxford-IIIT Pet Segmentation
 
-Second testing: Added mixed precision to speed up training time.
-implement a clamp on the weights as I noticed that the borders were too thick by the model. 
-Implemented data augmentation of color jitter, and randomhorizontal flip.
-Shows the Jaccard index of each class to better diagnose the errors.
+A U-Net from scratch to do semantic segmentation on the Oxford-IIIT Pet dataset. The masks have 3 classes: the pet, the background, and the thin boundary outline around the pet.
 
-Final IOU:  ~0.75-0.76
+## Results
 
-Third testing: 
-Added further data augmentation with randomresizecrop and randomaffine for rotations, cropping, and translations.
-Added a custom FocalIOU to better match the scenario as the pixel boundary in class 3 of the mask is very thin.
-Switched from cosineannealing lr scheduler to oneshot following the idea of super-convergence (https://arxiv.org/abs/1708.07120)
+| Run | Mean IoU |
+|-----|----------|
+| 1 | 0.756 |
+| 2 | ~0.75-0.76 |
+| 3 | 0.777 |
+| 4 | 0.791 |
 
-Final IOU: 0.776833333333
+## Changes per run
 
-Fourth Testing:
-Since the borders of the model are too thick, i increased the weight of the focal loss
-Added weight decay to prevent overfitting in the model.
+**Run 1** — first working version.
+
+**Run 2**
+- Added mixed precision to make training faster
+- Clamped the class weights because the model was drawing the borders way too thick
+- Added color jitter and random horizontal flip for augmentation
+- Started printing the Jaccard index per class to debug
+
+**Run 3**
+- More augmentation. Random resized crop and random affine for rotation, cropping, and translation.
+- Implemented focal loss + disce loss functions as it suits the topic
+- Swapped the cosine annealing scheduler for one cycle following super convergence idea (https://arxiv.org/abs/1708.07120).
+
+**Run 4**
+- Increased the class weight of the borders as the borders were too thick in the images
+- Added weight decay for overfitting
+- Added test time augmentation
+
+## Notes
+
+The boundary class is the hard part. The pet and background classes score in the high 0.8s / 0.9s, but the thin boundary ring is stuck around 0.5-0.6 and that's what holds the mean down. 
